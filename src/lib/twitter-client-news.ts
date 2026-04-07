@@ -6,6 +6,9 @@ import type { SearchResult, TweetData } from './twitter-client-types.js';
 const POST_COUNT_REGEX = /[\d.]+[KMB]?\s*posts?/i;
 const POST_COUNT_MATCH_REGEX = /([\d.]+)([KMB]?)\s*posts?/i;
 
+// Trend ID extraction from entryId (e.g., "stories-2041531073434746880-trend-2041503181079720083")
+const TREND_ID_REGEX = /trend-(\d+)$/;
+
 // Timeline IDs for different Explore tabs
 const TIMELINE_IDS = {
   forYou: 'VGltZWxpbmU6DAC2CwABAAAAB2Zvcl95b3UAAA==',
@@ -23,6 +26,8 @@ export interface NewsFetchOptions {
   includeRaw?: boolean;
   /** Also fetch related tweets for each news item */
   withTweets?: boolean;
+  /** Fetch AI-generated summary for each trend (uses AiTrendByRestId API) */
+  withAiSummary?: boolean;
   /** Number of tweets to fetch per news item (default: 5) */
   tweetsPerItem?: number;
   /** Filter to show only AI-curated news items */
@@ -33,15 +38,22 @@ export interface NewsFetchOptions {
 
 export interface NewsItem {
   id: string;
+  trendId?: string;
   headline: string;
   category?: string;
   timeAgo?: string;
   postCount?: number;
   description?: string;
   url?: string;
+  aiSummary?: string;
+  aiDisclaimer?: string;
+  topTimelineId?: string;
+  latestTimelineId?: string;
   tweets?: TweetData[];
   // biome-ignore lint/suspicious/noExplicitAny: Raw API response can have any structure
   _raw?: any;
+  // biome-ignore lint/suspicious/noExplicitAny: Raw AI trend response can have any structure
+  _aiTrendRaw?: any;
 }
 
 export type NewsResult =
@@ -74,6 +86,7 @@ export function withNews<TBase extends AbstractConstructor<TwitterClientBase>>(
       const {
         includeRaw = false,
         withTweets = false,
+        withAiSummary = false,
         tweetsPerItem = 5,
         aiOnly = false,
         tabs = ['forYou', 'news', 'sports', 'entertainment'],
@@ -129,11 +142,96 @@ export function withNews<TBase extends AbstractConstructor<TwitterClientBase>>(
       // Limit to requested count
       const items = allItems.slice(0, count);
 
-      if (withTweets) {
+      if (withAiSummary) {
+        await this.enrichWithTrendDetails(items, includeRaw);
+      } else if (withTweets) {
         await this.enrichWithTweets(items, tweetsPerItem, includeRaw);
       }
 
       return { success: true, items };
+    }
+
+    /**
+     * Fetch AI trend details (summary and timelines) using AiTrendByRestId
+     */
+    async getTrendById(trendId: string, includeRaw = false) {
+      const queryId = await this.getQueryId('AiTrendByRestId');
+      const variables = {
+        trendId: trendId,
+        includePromotedContent: false,
+        withBirdwatchNotes: false,
+        withVoice: false,
+        withCommunity: false,
+      };
+      const features = buildExploreFeatures();
+      const params = new URLSearchParams({
+        variables: JSON.stringify(variables),
+        features: JSON.stringify(features),
+      });
+      const url = `${TWITTER_API_BASE}/${queryId}/AiTrendByRestId?${params.toString()}`;
+      const response = await this.fetchWithTimeout(url, {
+        method: 'GET',
+        headers: this.getHeaders(),
+      });
+      if (!response.ok) {
+        const text = await response.text();
+        throw new Error(`HTTP ${response.status}: ${text.slice(0, 200)}`);
+      }
+      const data = (await response.json()) as {
+        // biome-ignore lint/suspicious/noExplicitAny: API response structure is complex
+        data?: any;
+        // biome-ignore lint/suspicious/noExplicitAny: API errors can have any structure
+        errors?: Array<{ message: string; code?: number; [key: string]: any }>;
+      };
+      if (data.errors && data.errors.length > 0) {
+        throw new Error(data.errors.map((e) => e.message).join('; '));
+      }
+      const trendData = data?.data?.ai_trend_by_rest_id;
+      if (!trendData) {
+        return null;
+      }
+      const result = trendData.result;
+      const article = result?.page?.article;
+      return {
+        trendId: trendData.rest_id,
+        title: article?.title,
+        aiSummary: article?.article_text?.text,
+        lastUpdatedAt: result?.page?.article?.last_updated_at_ms,
+        disclaimer: result?.page?.disclaimer,
+        topTimelineId: result?.page?.post_timelines?.[0]?.post_timeline?.id,
+        latestTimelineId: result?.page?.post_timelines?.[1]?.post_timeline?.id,
+        _raw: includeRaw ? result : undefined,
+      };
+    }
+
+    /**
+     * Enrich news items with AI summaries from AiTrendByRestId
+     */
+    async enrichWithTrendDetails(items: NewsItem[], includeRaw = false): Promise<void> {
+      const debug = process.env.BIRD_DEBUG === '1';
+      for (const item of items) {
+        if (!item.trendId) {
+          continue;
+        }
+        try {
+          const trendDetails = await this.getTrendById(item.trendId, includeRaw);
+          if (trendDetails) {
+            item.aiSummary = trendDetails.aiSummary;
+            item.aiDisclaimer = trendDetails.disclaimer;
+            item.topTimelineId = trendDetails.topTimelineId;
+            item.latestTimelineId = trendDetails.latestTimelineId;
+            if (includeRaw && trendDetails._raw) {
+              item._aiTrendRaw = trendDetails._raw;
+            }
+          }
+        } catch (error) {
+          if (debug) {
+            console.error(`[getNews] Failed to enrich trend ${item.trendId}:`, (error as Error).message);
+          }
+        }
+        // Rate limit to avoid getting blocked
+        await this.sleep(100);
+      }
     }
 
     /**
@@ -262,9 +360,11 @@ export function withNews<TBase extends AbstractConstructor<TwitterClientBase>>(
               continue;
             }
 
+            // Use item's own entryId (contains trend ID), not parent entry's entryId
+            const itemEntryId = data.entryId || entry.entryId;
             const newsItem = this.parseNewsItemFromContent(
               itemContent,
-              entry.entryId,
+              itemEntryId,
               source,
               seenHeadlines,
               aiOnly,
@@ -294,6 +394,15 @@ export function withNews<TBase extends AbstractConstructor<TwitterClientBase>>(
 
       if (!headline) {
         return null;
+      }
+
+      // Extract trend ID from entryId (e.g., "stories-2041531073434746880-trend-2041503181079720083")
+      let trendId: string | undefined;
+      if (entryId) {
+        const match = entryId.match(TREND_ID_REGEX);
+        if (match) {
+          trendId = match[1];
+        }
       }
 
       const trendMetadata = itemContent?.trend_metadata;
@@ -382,6 +491,7 @@ export function withNews<TBase extends AbstractConstructor<TwitterClientBase>>(
 
       const item: NewsItem = {
         id: trendUrl ?? (entryId ? `${entryId}-${headline}` : `${source}-${headline}`),
+        trendId,
         headline,
         category: isAiNews ? `AI · ${category}` : category,
         timeAgo,
@@ -402,7 +512,8 @@ export function withNews<TBase extends AbstractConstructor<TwitterClientBase>>(
 
       for (const item of items) {
         try {
-          const searchQuery = item.headline;
+          // Truncate headline to avoid search query too long (Twitter search limit ~500 chars)
+          const searchQuery = item.headline?.slice(0, 200) || '';
           if (!searchQuery) {
             continue;
           }

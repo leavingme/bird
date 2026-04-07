@@ -51,6 +51,15 @@ function printNewsItems(
       console.log(`  ${ctx.l('url')}${item.url}`);
     }
 
+    // Print AI summary if available
+    if (item.aiSummary) {
+      console.log(`  ${ctx.colors.section('AI Summary:')}`);
+      console.log(`  ${ctx.colors.muted(item.aiSummary)}`);
+      if (item.aiDisclaimer) {
+        console.log(`  ${ctx.colors.muted('(')}${ctx.colors.accent('disclaimer')}${ctx.colors.muted('): ')}${ctx.colors.muted(item.aiDisclaimer)}`);
+      }
+    }
+
     // Print related tweets if available
     if (item.tweets && item.tweets.length > 0) {
       console.log(`  ${ctx.colors.section('Related tweets:')}`);
@@ -73,7 +82,8 @@ export function registerNewsCommand(program: Command, ctx: CliContext): void {
     .description('Fetch AI-curated news and trending topics from Explore tabs')
     .option('-n, --count <number>', 'Number of items to fetch', '10')
     .option('--ai-only', 'Show only AI-curated news items')
-    .option('--with-tweets', 'Also fetch related tweets for each news item')
+    .option('--with-tweets', 'Also fetch related tweets for each news item (search-based)')
+    .option('--with-ai-summary', 'Fetch AI-generated summary for each trend (uses AiTrendByRestId API)')
     .option('--tweets-per-item <number>', 'Number of tweets to fetch per news item (default: 5)', '5')
     .option('--for-you', 'Fetch only from For You tab')
     .option('--news-only', 'Fetch only from News tab')
@@ -87,6 +97,7 @@ export function registerNewsCommand(program: Command, ctx: CliContext): void {
         count?: string;
         aiOnly?: boolean;
         withTweets?: boolean;
+        withAiSummary?: boolean;
         tweetsPerItem?: string;
         forYou?: boolean;
         newsOnly?: boolean;
@@ -147,11 +158,13 @@ export function registerNewsCommand(program: Command, ctx: CliContext): void {
         const client = new TwitterClient({ cookies, timeoutMs, quoteDepth });
         const includeRaw = cmdOpts.jsonFull ?? false;
         const withTweets = cmdOpts.withTweets ?? false;
+        const withAiSummary = cmdOpts.withAiSummary ?? false;
         const aiOnly = cmdOpts.aiOnly ?? false;
 
         const result = await client.getNews(count, {
           includeRaw,
           withTweets,
+          withAiSummary,
           tweetsPerItem,
           aiOnly,
           tabs: tabsToFetch,
