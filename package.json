@@ -34,7 +34,7 @@
     "lint:oxlint:fix": "oxlint --type-aware --tsconfig tsconfig.oxlint.json --import-plugin --node-plugin --vitest-plugin --deny-warnings --fix src tests scripts",
     "format": "biome format --write .",
     "binary": "pnpm run build:binary",
-    "graphql:update": "tsx scripts/update-query-ids.ts"
+    "graphql:update": "tsx src/lib/runtime-query-ids.ts"
   },
   "dependencies": {
     "@steipete/sweet-cookie": "0.1.0",
