@@ -1,6 +1,6 @@
 {
   "name": "@leavingme/bird",
-  "version": "0.8.4",
+  "version": "0.8.5",
   "description": "CLI tool for tweeting and replying via Twitter/X GraphQL API - forked from @steipete/bird",
   "type": "module",
   "main": "dist/index.js",
