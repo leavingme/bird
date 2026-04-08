@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.8.2 — 2026-04-08
+
+### Added
+- Claude Code skill installed to `~/.agents/skills/bird/` on npm install (postinstall hook).
+
+### Changed
+- `skills/bird-SKILL.md` reorganized to `skills/bird/SKILL.md`.
+
 ## 0.8.0 — 2026-01-19
 
 ### Added

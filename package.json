@@ -1,7 +1,7 @@
 {
-  "name": "@steipete/bird",
-  "version": "0.8.0",
-  "description": "CLI tool for tweeting and replying via Twitter/X GraphQL API",
+  "name": "@leavingme/bird",
+  "version": "0.8.2",
+  "description": "CLI tool for tweeting and replying via Twitter/X GraphQL API - forked from @steipete/bird",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -10,11 +10,13 @@
   },
   "files": [
     "dist",
+    "skills",
     "README.md",
     "CHANGELOG.md",
     "LICENSE"
   ],
   "scripts": {
+    "postinstall": "mkdir -p \"$HOME/.agents/skills\" && cp -r \"$(pwd)/skills/bird\" \"$HOME/.agents/skills/\"",
     "build": "pnpm run build:dist && pnpm run build:binary",
     "build:dist": "tsc && node scripts/copy-dist-assets.js",
     "build:binary": "BIRD_VERSION=$(node -p \"require('./package.json').version\") BIRD_GIT_SHA=$(git rev-parse --short=8 HEAD 2>/dev/null || true) bun build --compile --minify --env=BIRD_* src/cli.ts --outfile bird",
