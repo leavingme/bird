@@ -8,6 +8,12 @@
 ### Changed
 - `skills/bird-SKILL.md` reorganized to `skills/bird/SKILL.md`.
 
+## 0.8.3 — 2026-04-08
+
+### Changed
+- Update README install commands from `@steipete/bird` to `@leavingme/bird`.
+- Update library import example in README.
+
 ## 0.8.0 — 2026-01-19
 
 ### Added
