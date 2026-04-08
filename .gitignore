@@ -20,3 +20,4 @@ bird
 *.tar
 *.tar.gz
 *.tgz
+.gstack/

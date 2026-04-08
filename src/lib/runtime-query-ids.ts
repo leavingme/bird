@@ -10,6 +10,7 @@ const DISCOVERY_PAGES: string[] = [
   'https://x.com/explore',
   'https://x.com/notifications',
   'https://x.com/settings/profile',
+  'https://x.com/i/trending/1',
 ];
 
 const BUNDLE_URL_REGEX = /https:\/\/abs\.twimg\.com\/responsive-web\/client-web(?:-legacy)?\/[A-Za-z0-9.-]+\.js/g;

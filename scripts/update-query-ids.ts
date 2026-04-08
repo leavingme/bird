@@ -2,8 +2,15 @@
 /**
  * Fetches current Twitter/X GraphQL query IDs from public client bundles and
  * updates src/lib/query-ids.json.
+ *
+ * For operations whose bundles are lazily loaded (e.g. AiTrendByRestId lives in
+ * bundle.LiveEvent.*.js which is never linked from initial HTML), a Chrome headless
+ * fallback is used when available: the browser navigates to the trending page, the
+ * lazy chunk loads automatically, its URL is captured via CDP, and the bundle is
+ * fetched + scanned like any other.
  */
 
+import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 
@@ -28,10 +35,19 @@ const TARGET_OPERATIONS = [
   'ExplorePage',
   'GenericTimelineById',
   'TrendHistory',
+  'AiTrendByRestId',
   'AboutAccountQuery',
 ] as const;
 
 type OperationName = (typeof TARGET_OPERATIONS)[number];
+
+/**
+ * Operations that live in lazily-loaded chunks not discoverable from static HTML.
+ * For these we use the Chrome CDP fallback with a targeted discovery URL.
+ */
+const LAZY_OPERATIONS: Partial<Record<OperationName, string>> = {
+  AiTrendByRestId: 'https://x.com/i/trending/1',
+};
 
 const DISCOVERY_PAGES = [
   'https://x.com/?lang=en',
@@ -186,6 +202,228 @@ async function fetchAndExtract(
   return discovered;
 }
 
+// ---------------------------------------------------------------------------
+// Chrome CDP fallback for lazily-loaded bundles
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns the path to a Chrome/Chromium executable, or null if none found.
+ */
+async function findChrome(): Promise<string | null> {
+  const candidates = [
+    process.env.CHROME_PATH,
+    process.env.CHROMIUM_PATH,
+    '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+    '/Applications/Chromium.app/Contents/MacOS/Chromium',
+    '/usr/bin/google-chrome',
+    '/usr/bin/google-chrome-stable',
+    '/usr/bin/chromium',
+    '/usr/bin/chromium-browser',
+    '/snap/bin/chromium',
+    '/usr/local/bin/chromium',
+  ].filter(Boolean) as string[];
+
+  for (const p of candidates) {
+    try {
+      await fs.access(p, fs.constants.X_OK);
+      return p;
+    } catch {
+      // not found or not executable
+    }
+  }
+  return null;
+}
+
+/**
+ * Use Chrome headless + CDP to load `pageUrl`, wait for `bundle.LiveEvent.*.js`
+ * to be requested (it loads as a lazy webpack chunk), fetch it, and extract
+ * queryIds for the given target operations.
+ *
+ * Returns a map of operationName → { queryId, bundle }.
+ */
+async function discoverViaChrome(
+  chromePath: string,
+  pageUrl: string,
+  targets: Set<OperationName>,
+): Promise<Map<OperationName, DiscoveredOperation>> {
+  const discovered = new Map<OperationName, DiscoveredOperation>();
+
+  // Start Chrome with remote debugging enabled
+  const CDP_PORT = 19222;
+  const chromeProc = spawn(
+    chromePath,
+    [
+      '--headless=new',
+      `--remote-debugging-port=${CDP_PORT}`,
+      '--no-sandbox',
+      '--disable-gpu',
+      '--disable-dev-shm-usage',
+      '--no-first-run',
+      '--no-default-browser-check',
+      '--disable-extensions',
+      '--disable-background-networking',
+      '--disable-sync',
+      '--disable-translate',
+      '--mute-audio',
+      `--user-data-dir=/tmp/bird-chrome-${Date.now()}`,
+    ],
+    { stdio: 'ignore', detached: false },
+  );
+
+  const cleanup = () => {
+    try {
+      chromeProc.kill('SIGKILL');
+    } catch {
+      // already dead
+    }
+  };
+
+  try {
+    // Wait for Chrome to be ready (poll /json/version endpoint)
+    const cdpBase = `http://127.0.0.1:${CDP_PORT}`;
+    for (let attempt = 0; attempt < 30; attempt++) {
+      await new Promise((r) => setTimeout(r, 300));
+      try {
+        const res = await fetch(`${cdpBase}/json/version`);
+        if (res.ok) break;
+      } catch {
+        // not ready yet
+      }
+    }
+
+    // Get a tab's websocket debugger URL
+    const listRes = await fetch(`${cdpBase}/json/list`);
+    if (!listRes.ok) throw new Error('CDP /json/list failed');
+    const tabs = (await listRes.json()) as Array<{ webSocketDebuggerUrl?: string; type?: string }>;
+    const tab = tabs.find((t) => t.type === 'page' && t.webSocketDebuggerUrl);
+    if (!tab?.webSocketDebuggerUrl) throw new Error('No CDP page tab found');
+
+    // Connect via WebSocket (Node 22 has built-in WebSocket)
+    const bundleUrls = await new Promise<string[]>((resolve, reject) => {
+      const ws = new WebSocket(tab.webSocketDebuggerUrl as string);
+      const capturedUrls: string[] = [];
+      let msgId = 1;
+      const send = (method: string, params?: Record<string, unknown>) => {
+        ws.send(JSON.stringify({ id: msgId++, method, params: params ?? {} }));
+      };
+
+      const TIMEOUT_MS = 20_000;
+      const timer = setTimeout(() => {
+        resolve(capturedUrls);
+      }, TIMEOUT_MS);
+
+      ws.addEventListener('open', () => {
+        send('Network.enable');
+        send('Page.enable');
+      });
+
+      ws.addEventListener('message', (evt: MessageEvent) => {
+        let msg: { method?: string; params?: { request?: { url?: string } } };
+        try {
+          msg = JSON.parse(evt.data as string) as typeof msg;
+        } catch {
+          return;
+        }
+
+        if (msg.method === 'Network.requestWillBeSent') {
+          const url = msg.params?.request?.url ?? '';
+          if (/\/bundle\.LiveEvent\.[A-Za-z0-9]+\.js/.test(url)) {
+            capturedUrls.push(url);
+            // Got what we need — stop waiting
+            clearTimeout(timer);
+            resolve(capturedUrls);
+          }
+        }
+
+        if (msg.method === 'Page.loadEventFired') {
+          // Page fully loaded but no LiveEvent bundle seen — give JS 3s to lazily load
+          setTimeout(() => {
+            resolve(capturedUrls);
+            clearTimeout(timer);
+          }, 3000);
+        }
+      });
+
+      ws.addEventListener('error', (e) => reject(new Error(`CDP WebSocket error: ${String(e)}`)));
+
+      // Navigate to target page after a short delay to ensure handlers are wired
+      setTimeout(() => {
+        send('Page.navigate', { url: pageUrl });
+      }, 200);
+    });
+
+    if (bundleUrls.length === 0) {
+      console.warn(`[warn] Chrome CDP: no bundle.LiveEvent URL captured from ${pageUrl}`);
+      return discovered;
+    }
+
+    console.log(`[info] Chrome CDP captured ${bundleUrls.length} lazy bundle(s)`);
+    for (const url of bundleUrls) {
+      const label = url.split('/').at(-1) ?? url;
+      console.log(`[info]   ${label}`);
+      try {
+        const js = await fetchText(url);
+        extractOperations(js, label, targets, discovered);
+      } catch (error) {
+        console.warn(`[warn] Failed to fetch/scan ${label}:`, error instanceof Error ? error.message : error);
+      }
+    }
+  } finally {
+    cleanup();
+  }
+
+  return discovered;
+}
+
+/**
+ * Discover operations that live in lazily-loaded bundles using Chrome CDP.
+ * If Chrome is not available, logs a warning and returns an empty map
+ * (caller will fall through to existing/fallback values).
+ */
+async function discoverLazyOperations(
+  missing: Set<OperationName>,
+): Promise<Map<OperationName, DiscoveredOperation>> {
+  const result = new Map<OperationName, DiscoveredOperation>();
+
+  // Group missing lazy ops by their discovery page
+  const pageToOps = new Map<string, Set<OperationName>>();
+  for (const op of missing) {
+    const page = LAZY_OPERATIONS[op];
+    if (!page) continue;
+    if (!pageToOps.has(page)) pageToOps.set(page, new Set());
+    pageToOps.get(page)!.add(op);
+  }
+
+  if (pageToOps.size === 0) return result;
+
+  const chromePath = await findChrome();
+  if (!chromePath) {
+    console.warn('[warn] Chrome not found; skipping CDP fallback for lazy bundles:', [...missing].join(', '));
+    console.warn('[warn] Set CHROME_PATH env var or install Chrome to enable this.');
+    return result;
+  }
+
+  console.log(`[info] Using Chrome CDP fallback: ${chromePath}`);
+
+  for (const [page, ops] of pageToOps) {
+    try {
+      const found = await discoverViaChrome(chromePath, page, ops);
+      for (const [op, info] of found) {
+        result.set(op, info);
+      }
+    } catch (error) {
+      console.warn(
+        `[warn] Chrome CDP failed for ${page}:`,
+        error instanceof Error ? error.message : error,
+      );
+    }
+  }
+
+  return result;
+}
+
+// ---------------------------------------------------------------------------
+
 async function writeIds(ids: Record<OperationName, string>): Promise<void> {
   const ordered: Record<OperationName, string> = {} as Record<OperationName, string>;
   for (const op of TARGET_OPERATIONS) {
@@ -203,10 +441,21 @@ async function main(): Promise<void> {
   const bundleUrls = await discoverBundles();
   console.log(`[info] Found ${bundleUrls.length} bundles`);
 
-  const targets = new Set<OperationName>(TARGET_OPERATIONS);
+  // Operations in LAZY_OPERATIONS always go through Chrome CDP — skip static scan for them.
+  const lazyOps = new Set<OperationName>(Object.keys(LAZY_OPERATIONS) as OperationName[]);
+  const staticTargets = new Set<OperationName>(TARGET_OPERATIONS.filter((op) => !lazyOps.has(op)));
   const existing = await readExistingIds();
 
-  const discovered = await fetchAndExtract(bundleUrls, targets);
+  const discovered = await fetchAndExtract(bundleUrls, staticTargets);
+
+  if (lazyOps.size > 0) {
+    console.log(`[info] Lazy operations (Chrome CDP): ${[...lazyOps].join(', ')}`);
+    const lazyFound = await discoverLazyOperations(lazyOps);
+    for (const [op, info] of lazyFound) {
+      discovered.set(op, info);
+    }
+  }
+
   if (discovered.size === 0) {
     throw new Error('No query IDs discovered; extraction patterns may need an update.');
   }
