@@ -340,8 +340,31 @@ async function discoverViaChrome(
 
     const listRes = await fetch(`${cdpBase}/json/list`);
     if (!listRes.ok) throw new Error('CDP /json/list failed');
-    const tabs = (await listRes.json()) as Array<{ webSocketDebuggerUrl?: string; type?: string }>;
-    const tab = tabs.find((t) => t.type === 'page' && t.webSocketDebuggerUrl);
+    const tabs = (await listRes.json()) as Array<{ webSocketDebuggerUrl?: string; type?: string; url?: string }>;
+
+    // Try to create a fresh about:blank tab first (avoids chrome://newtab/ navigation block)
+    let tab = tabs.find((t) => t.type === 'page' && t.url === 'about:blank' && t.webSocketDebuggerUrl);
+    if (!tab?.webSocketDebuggerUrl) {
+      try {
+        const newTabRes = await fetch(`${cdpBase}/json/new`, {
+          method: 'PUT',
+          body: JSON.stringify({ url: 'about:blank' }),
+        });
+        if (newTabRes.ok) {
+          const newTab = (await newTabRes.json()) as { webSocketDebuggerUrl?: string; url?: string };
+          if (newTab?.webSocketDebuggerUrl) {
+            tab = newTab as (typeof tabs)[number];
+          }
+        }
+      } catch {
+        // ignore create tab failure
+      }
+    }
+
+    // Fall back to first available page tab
+    if (!tab?.webSocketDebuggerUrl) {
+      tab = tabs.find((t) => t.type === 'page' && t.webSocketDebuggerUrl);
+    }
     if (!tab?.webSocketDebuggerUrl) throw new Error('No CDP page tab found');
 
     const bundleUrls = await new Promise<string[]>((resolve, reject) => {
