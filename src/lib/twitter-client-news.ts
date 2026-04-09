@@ -2,6 +2,7 @@ import type { AbstractConstructor, Mixin, TwitterClientBase } from './twitter-cl
 import { TWITTER_API_BASE } from './twitter-client-constants.js';
 import { buildExploreFeatures } from './twitter-client-features.js';
 import type { SearchResult, TweetData } from './twitter-client-types.js';
+import { parseTweetsFromInstructions } from './twitter-client-utils.js';
 
 const POST_COUNT_REGEX = /[\d.]+[KMB]?\s*posts?/i;
 const POST_COUNT_MATCH_REGEX = /([\d.]+)([KMB]?)\s*posts?/i;
@@ -144,7 +145,8 @@ export function withNews<TBase extends AbstractConstructor<TwitterClientBase>>(
 
       if (withAiSummary) {
         await this.enrichWithTrendDetails(items, includeRaw);
-      } else if (withTweets) {
+      }
+      if (withTweets) {
         await this.enrichWithTweets(items, tweetsPerItem, includeRaw);
       }
 
@@ -512,21 +514,49 @@ export function withNews<TBase extends AbstractConstructor<TwitterClientBase>>(
 
       for (const item of items) {
         try {
-          // Truncate headline to avoid search query too long (Twitter search limit ~500 chars)
-          const searchQuery = item.headline?.slice(0, 200) || '';
-          if (!searchQuery) {
+          // Use topTimelineId from the trend item to fetch tweets directly via GenericTimelineById
+          const timelineId = item.topTimelineId || item.latestTimelineId;
+          if (!timelineId) {
             continue;
           }
 
-          // Use the search method if available (requires search mixin)
-          if ('search' in this && typeof (this as { search?: unknown }).search === 'function') {
-            const result = (await (
-              this as { search: (q: string, c: number, o: { includeRaw: boolean }) => Promise<SearchResult> }
-            ).search(searchQuery, tweetsPerItem, { includeRaw })) as SearchResult;
+          const queryId = await this.getQueryId('GenericTimelineById');
+          const features = buildExploreFeatures();
+          const variables = {
+            timelineId: timelineId,
+            count: tweetsPerItem * 2, // Fetch more to account for filtering
+            includePromotedContent: false,
+          };
+          const params = new URLSearchParams({
+            variables: JSON.stringify(variables),
+            features: JSON.stringify(features),
+          });
+          const url = `${TWITTER_API_BASE}/${queryId}/GenericTimelineById?${params.toString()}`;
 
-            if (result.success && result.tweets) {
-              item.tweets = result.tweets;
+          const response = await this.fetchWithTimeout(url, {
+            method: 'GET',
+            headers: this.getHeaders(),
+          });
+
+          if (!response.ok) {
+            if (debug) {
+              console.error(`[getNews] HTTP ${response.status} for timeline ${timelineId}`);
             }
+            continue;
+          }
+
+          const data = (await response.json()) as { data?: { timeline?: { timeline?: { instructions?: unknown[] } } } };
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const instructions = (data?.data?.timeline?.timeline?.instructions ?? []) as any;
+
+          // Parse tweets from the timeline response using the standard tweet parser
+          const tweets = parseTweetsFromInstructions(instructions, {
+            quoteDepth: this.quoteDepth,
+            includeRaw,
+          });
+
+          if (tweets.length > 0) {
+            item.tweets = tweets;
           }
         } catch {
           if (debug) {
