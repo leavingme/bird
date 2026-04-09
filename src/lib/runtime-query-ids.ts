@@ -297,6 +297,9 @@ async function discoverViaChrome(
 ): Promise<Map<string, { queryId: string; bundle: string }>> {
   const discovered = new Map<string, { queryId: string; bundle: string }>();
 
+  // Avoid D-Bus connection errors in headless environments
+  process.env.DBUS_SESSION_BUS_ADDRESS = '/dev/null';
+
   const CDP_PORT = 19222;
   const chromeProc = spawn(
     chromePath,
