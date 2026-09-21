@@ -84,7 +84,28 @@ bird followers --user 12345678 -n 10  # by user ID
 
 # Refresh GraphQL query IDs cache (no rebuild)
 bird query-ids --fresh
+
+# Read Direct Messages and encrypted X Chat groups
+bird chat list -n 20
+bird chat read 12345678-87654321 --json
+bird chat pin                              # store the X Chat PIN in macOS Keychain
+bird chat read g1234567890123456789 --json
+bird chat search "release" --conversation g1234567890123456789 --json
 ```
+
+## Direct Messages and X Chat
+
+`bird chat` is read-only. It can read legacy Direct Messages through the cookie-authenticated DM endpoint and
+encrypted X Chat groups through X's Chat GraphQL responses plus the official
+[`@xdevplatform/chat-xdk`](https://github.com/xdevplatform/chat-xdk) decryption SDK.
+
+Encrypted conversations use IDs beginning with `g`. Recovery needs the X Chat PIN that protects the account's
+existing identity. On macOS, run `bird chat pin` once to save it in Keychain without echoing it. On other platforms,
+pass `--pin` or set the temporary `XCHAT_PIN` environment variable. Bird never includes the PIN or private key
+material in its JSON output.
+
+Use the `pagination.minLocalSequenceId` value returned by `--json` with `--before` to request an older page. X Chat
+operation IDs are private and may change without notice, like Bird's other web GraphQL integrations.
 
 ## News & Trending
 
@@ -188,6 +209,10 @@ Fields:
 - `bird about <@handle> [--json]` — get account origin and location information for a user.
 - `bird whoami` — print which Twitter account your cookies belong to.
 - `bird check` — show which credentials are available and where they were sourced from.
+- `bird chat list [-n count] [--json]` — list conversations exposed by the legacy DM inbox endpoint.
+- `bird chat read <conversation-id> [-n count] [--before sequence-id] [--pin pin] [--json]` — read a legacy DM or decrypt an X Chat group (`g…`).
+- `bird chat search <query> [--conversation id] [-n count] [--before sequence-id] [--pin pin] [--json]` — search the inbox snapshot or one encrypted group.
+- `bird chat pin [--clear]` — save or remove the X Chat PIN in macOS Keychain.
 
 Bookmarks flags:
 - `--expand-root-only`: expand threads only when the bookmark is a root tweet.

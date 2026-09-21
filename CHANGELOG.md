@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- Read-only `chat list`, `chat read`, and `chat search` commands for legacy Direct Messages and encrypted X Chat groups.
+- Secure X Chat PIN storage through macOS Keychain, with `--pin` and `XCHAT_PIN` alternatives.
+
 ## 0.8.2 — 2026-04-08
 
 ### Added
